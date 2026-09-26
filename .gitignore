@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+ReUni_MySQL_Payment_Backend_FIXED/

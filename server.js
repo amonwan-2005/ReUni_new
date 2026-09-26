@@ -25,35 +25,20 @@ const FEE_RATE = 3;
 const FEE_CAP = 20;
 const PREMIUM_PRICE = 49;
 const PREMIUM_CREDIT = 30;
-const PREMIUM_PLANS = new Map([[7,15],[30,49],[90,129]]);
 const PROMO_PLANS = new Map([[3,15],[7,29],[14,49],[30,79],[60,129]]);
-const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:3000';
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
-// Local/sandbox defaults. These are the public 2C2P demo credentials documented for Thailand.
-// Production credentials MUST be supplied through environment variables and never placed in HTML.
-const TWOC2P_BASE_URL = String(process.env.TWOC2P_BASE_URL || 'https://sandbox-pgw.2c2p.com').trim().replace(/\/$/, '');
-const TWOC2P_API_VERSION = String(process.env.TWOC2P_API_VERSION || '4.3').trim();
-const DEMO_MERCHANT_ID = 'JT04';
-const DEMO_SECRET_KEY = 'CD229682D3297390B9F66FF4020B758F4A5E625AF4992E5D75D311D6458B38E2';
-let TWOC2P_MERCHANT_ID = String(process.env.TWOC2P_MERCHANT_ID || '').trim();
-let TWOC2P_SECRET_KEY = String(process.env.TWOC2P_SECRET_KEY || '').trim();
-// When using the official 2C2P sandbox endpoint, force the documented Thai demo account
-// so an old/placeholder .env value cannot keep returning Invalid merchant (9007).
-if(TWOC2P_BASE_URL.includes('sandbox-pgw.2c2p.com')) {
-  TWOC2P_MERCHANT_ID = DEMO_MERCHANT_ID;
-  TWOC2P_SECRET_KEY = DEMO_SECRET_KEY;
-} else {
-  if(!TWOC2P_MERCHANT_ID || /^YOUR_/i.test(TWOC2P_MERCHANT_ID)) throw new Error('TWOC2P_MERCHANT_ID is required for production');
-  if(!TWOC2P_SECRET_KEY || /^YOUR_/i.test(TWOC2P_SECRET_KEY)) throw new Error('TWOC2P_SECRET_KEY is required for production');
+function publicBaseUrl(req){
+  return APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
 }
 
 function calcFee(price){ return Math.min(Math.round(Number(price) * FEE_RATE) / 100, FEE_CAP); }
 function invoice(prefix='RU'){ return `${prefix}${Date.now()}${Math.random().toString(36).slice(2,7).toUpperCase()}`.slice(0,50); }
-function twoc2pSign(payload){ return jwt.sign(payload, TWOC2P_SECRET_KEY, {algorithm:'HS256'}); }
-function twoc2pDecode(token){ return jwt.verify(token, TWOC2P_SECRET_KEY, {algorithms:['HS256']}); }
+function twoc2pSign(payload){ return jwt.sign(payload, process.env.TWOC2P_SECRET_KEY, {algorithm:'HS256'}); }
+function twoc2pDecode(token){ return jwt.verify(token, process.env.TWOC2P_SECRET_KEY, {algorithms:['HS256']}); }
 async function twoc2pPost(endpoint, payload){
   const token = twoc2pSign(payload);
-  const res = await fetch(`${TWOC2P_BASE_URL}/payment/${TWOC2P_API_VERSION}/${endpoint}`, {
+  const res = await fetch(`${process.env.TWOC2P_BASE_URL}/payment/${process.env.TWOC2P_API_VERSION}/${endpoint}`, {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({payload:token})
   });
   const body = await res.json();
@@ -69,7 +54,7 @@ function currentUser(req){
 }
 
 app.get('/api/health', async (req,res)=>{
-  try { await pool.query('SELECT 1'); res.json({ok:true,mysql:true,provider:TWOC2P_MERCHANT_ID?'configured':'not_configured'}); }
+  try { await pool.query('SELECT 1'); res.json({ok:true,mysql:true,provider:process.env.TWOC2P_MERCHANT_ID?'configured':'not_configured'}); }
   catch(e){ res.status(500).json({ok:false,mysql:false,error:e.message}); }
 });
 
@@ -99,7 +84,7 @@ app.post('/api/promotions/checkout', async (req,res)=>{
     const [pay]=await conn.query('INSERT INTO payments(invoice_no,user_email,payment_type,reference_id,amount,status) VALUES(?,?,?,?,?,?)',[invoiceNo,email,'promotion',String(productId),cashPaid,'pending']);
     await conn.query('UPDATE users SET promo_credit=promo_credit-? WHERE email=?',[creditUsed,email]);
     await conn.query('INSERT INTO promotions(user_email,product_id,days,package_price,credit_used,cash_paid,payment_id,starts_at,expires_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)',[email,productId,planDays,price,creditUsed,cashPaid,pay.insertId,start,end,'pending']);
-    const payload={merchantID:TWOC2P_MERCHANT_ID,invoiceNo,description:`ReUni โปรโมต ${pRows[0].name} ${planDays} วัน`,amount:cashPaid.toFixed(2),currencyCode:'THB',paymentChannel:['CC','QR'],locale:'th',frontendReturnUrl:`${APP_BASE_URL}/payment-return?invoiceNo=${encodeURIComponent(invoiceNo)}`,backendReturnUrl:`${APP_BASE_URL}/api/payments/2c2p/backend`,nonceStr:Math.random().toString(36).slice(2,14)};
+    const payload={merchantID:process.env.TWOC2P_MERCHANT_ID,invoiceNo,description:`ReUni โปรโมต ${pRows[0].name} ${planDays} วัน`,amount:cashPaid.toFixed(2),currencyCode:'THB',paymentChannel:['CC','QR'],locale:'th',frontendReturnUrl:`${publicBaseUrl(req)}/payment-return?invoiceNo=${encodeURIComponent(invoiceNo)}`,backendReturnUrl:`${publicBaseUrl(req)}/api/payments/2c2p/backend`,nonceStr:Math.random().toString(36).slice(2,14)};
     const result=await twoc2pPost('paymentToken',payload);
     if(result.respCode!=='0000'){
       await conn.rollback();
@@ -111,10 +96,6 @@ app.post('/api/promotions/checkout', async (req,res)=>{
   }catch(e){try{await conn.rollback()}catch{};res.status(500).json({error:e.message});}finally{conn.release();}
 });
 
-app.get('/api/payment-config', (req,res)=>{
-  res.json({ok:true,provider:'2C2P',baseUrl:TWOC2P_BASE_URL,apiVersion:TWOC2P_API_VERSION,merchantId:TWOC2P_MERCHANT_ID,sandbox:TWOC2P_BASE_URL.includes('sandbox-pgw')});
-});
-
 app.post('/api/payments/create', async (req,res)=>{
   const email=currentUser(req);
   if(!email) return res.status(401).json({error:'ต้องเข้าสู่ระบบ'});
@@ -122,13 +103,7 @@ app.post('/api/payments/create', async (req,res)=>{
   const conn=await pool.getConnection();
   try{
     let amount=0, description='', referenceId=null;
-    if(type==='premium') {
-      const planDays=Number(days||30);
-      amount=PREMIUM_PLANS.get(planDays)||0;
-      if(!amount) return res.status(400).json({error:'แพ็กเกจ Premium ไม่ถูกต้อง'});
-      description=planDays===90?'ReUni Premium 3 เดือน':`ReUni Premium ${planDays} วัน`;
-      referenceId=String(planDays);
-    }
+    if(type==='premium') { amount=PREMIUM_PRICE; description='ReUni Premium 1 เดือน'; }
     else if(type==='promotion') {
       const plan=Number(days); amount=PROMO_PLANS.get(plan)||0;
       if(!amount) return res.status(400).json({error:'แพ็กเกจโปรโมตไม่ถูกต้อง'});
@@ -146,12 +121,12 @@ app.post('/api/payments/create', async (req,res)=>{
     const invoiceNo=invoice(type==='premium'?'PR':type==='promotion'?'PM':'SO');
     const [r]=await conn.query('INSERT INTO payments(invoice_no,user_email,payment_type,reference_id,amount,status) VALUES(?,?,?,?,?,?)',[invoiceNo,email,type,referenceId,amount,'pending']);
     const payload={
-      merchantID:TWOC2P_MERCHANT_ID,
+      merchantID:process.env.TWOC2P_MERCHANT_ID,
       invoiceNo,description,amount:amount.toFixed(2),currencyCode:'THB',
       paymentChannel:['CC','QR'],
       locale:'th',
-      frontendReturnUrl:`${APP_BASE_URL}/payment-return?invoiceNo=${encodeURIComponent(invoiceNo)}`,
-      backendReturnUrl:`${APP_BASE_URL}/api/payments/2c2p/backend`,
+      frontendReturnUrl:`${publicBaseUrl(req)}/payment-return?invoiceNo=${encodeURIComponent(invoiceNo)}`,
+      backendReturnUrl:`${publicBaseUrl(req)}/api/payments/2c2p/backend`,
       nonceStr:Math.random().toString(36).slice(2,14)
     };
     const result=await twoc2pPost('paymentToken',payload);
@@ -180,13 +155,10 @@ app.post('/api/payments/2c2p/backend', async (req,res)=>{
       if(p.payment_type==='premium'){
         const [existing]=await conn.query('SELECT id FROM premium_subscriptions WHERE payment_id=? LIMIT 1',[p.id]);
         if(!existing.length){
-          const planDays=Number(p.reference_id||30);
-          const planPrice=PREMIUM_PLANS.get(planDays)||Number(p.amount||0);
-          const [u]=await conn.query('SELECT premium_until,promo_credit FROM users WHERE email=? FOR UPDATE',[p.user_email]);
-          const startDate=new Date(); const base=u[0]?.premium_until && new Date(u[0].premium_until)>startDate?new Date(u[0].premium_until):startDate; const expires=new Date(base); expires.setDate(expires.getDate()+planDays);
-          const credit=Math.round(PREMIUM_CREDIT*planDays/30);
-          await conn.query('INSERT INTO premium_subscriptions(user_email,payment_id,price,promo_credit,starts_at,expires_at,status) VALUES(?,?,?,?,?,?,?)',[p.user_email,p.id,planPrice,credit,startDate,expires,'active']);
-          await conn.query('INSERT INTO users(email,name,premium_until,promo_credit) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE premium_until=VALUES(premium_until),promo_credit=promo_credit+VALUES(promo_credit),updated_at=CURRENT_TIMESTAMP',[p.user_email,p.user_email,expires,credit]);
+          const [u]=await conn.query('SELECT premium_until FROM users WHERE email=? FOR UPDATE',[p.user_email]);
+          const startDate=new Date(); const base=u[0]?.premium_until && new Date(u[0].premium_until)>startDate?new Date(u[0].premium_until):startDate; const expires=new Date(base); expires.setMonth(expires.getMonth()+1);
+          await conn.query('INSERT INTO premium_subscriptions(user_email,payment_id,price,promo_credit,starts_at,expires_at,status) VALUES(?,?,?,?,?,?,?)',[p.user_email,p.id,PREMIUM_PRICE,PREMIUM_CREDIT,startDate,expires,'active']);
+          await conn.query('INSERT INTO users(email,name,premium_until,promo_credit) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE premium_until=VALUES(premium_until),promo_credit=VALUES(promo_credit),updated_at=CURRENT_TIMESTAMP',[p.user_email,p.user_email,expires,PREMIUM_CREDIT]);
         }
       }
       if(p.payment_type==='promotion') await conn.query('UPDATE promotions SET status=\'active\' WHERE payment_id=?',[p.id]);
@@ -203,8 +175,26 @@ app.get('/api/payments/:invoiceNo', async (req,res)=>{
   res.json(rows[0]);
 });
 
-app.use(express.static(path.join(__dirname,'public')));
-app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+// Serve the ReUni frontend from /public. The explicit / route makes the
+// homepage work even when Express static-file index resolution is unavailable.
+const publicDir = path.join(__dirname, 'public');
+const publicIndex = path.join(publicDir, 'index.html');
+const fallbackIndex = path.join(__dirname, 'public_index_tmp.html');
 
-const port=Number(process.env.PORT||3000);
-app.listen(port,()=>console.log(`ReUni backend listening on :${port}`));
+app.use(express.static(publicDir));
+
+app.get('/', (req,res)=>{
+  res.sendFile(publicIndex, err => {
+    if (err) res.sendFile(fallbackIndex);
+  });
+});
+
+// Client-side routes such as /payment-return should still load the SPA.
+app.get('*',(req,res)=>{
+  res.sendFile(publicIndex, err => {
+    if (err) res.sendFile(fallbackIndex);
+  });
+});
+
+const port=Number(process.env.PORT||10000);
+app.listen(port, '0.0.0.0', ()=>console.log(`ReUni backend listening on 0.0.0.0:${port}`));

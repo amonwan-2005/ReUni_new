@@ -25,6 +25,7 @@ const FEE_RATE = 3;
 const FEE_CAP = 20;
 const PREMIUM_PRICE = 49;
 const PREMIUM_CREDIT = 30;
+const PREMIUM_PLANS = new Map([[7,{price:15,credit:0,label:'Premium 7 วัน'}],[30,{price:49,credit:30,label:'Premium 30 วัน'}],[90,{price:129,credit:90,label:'Premium 3 เดือน'}]]);
 const PROMO_PLANS = new Map([[3,15],[7,29],[14,49],[30,79],[60,129]]);
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
@@ -103,7 +104,11 @@ app.post('/api/payments/create', async (req,res)=>{
   const conn=await pool.getConnection();
   try{
     let amount=0, description='', referenceId=null;
-    if(type==='premium') { amount=PREMIUM_PRICE; description='ReUni Premium 1 เดือน'; }
+    if(type==='premium') {
+      const planDays=Number(days||30), plan=PREMIUM_PLANS.get(planDays);
+      if(!plan) return res.status(400).json({error:'แพ็กเกจ Premium ไม่ถูกต้อง'});
+      amount=plan.price; description=`ReUni ${plan.label}`; referenceId=String(planDays);
+    }
     else if(type==='promotion') {
       const plan=Number(days); amount=PROMO_PLANS.get(plan)||0;
       if(!amount) return res.status(400).json({error:'แพ็กเกจโปรโมตไม่ถูกต้อง'});
@@ -155,10 +160,12 @@ app.post('/api/payments/2c2p/backend', async (req,res)=>{
       if(p.payment_type==='premium'){
         const [existing]=await conn.query('SELECT id FROM premium_subscriptions WHERE payment_id=? LIMIT 1',[p.id]);
         if(!existing.length){
-          const [u]=await conn.query('SELECT premium_until FROM users WHERE email=? FOR UPDATE',[p.user_email]);
-          const startDate=new Date(); const base=u[0]?.premium_until && new Date(u[0].premium_until)>startDate?new Date(u[0].premium_until):startDate; const expires=new Date(base); expires.setMonth(expires.getMonth()+1);
-          await conn.query('INSERT INTO premium_subscriptions(user_email,payment_id,price,promo_credit,starts_at,expires_at,status) VALUES(?,?,?,?,?,?,?)',[p.user_email,p.id,PREMIUM_PRICE,PREMIUM_CREDIT,startDate,expires,'active']);
-          await conn.query('INSERT INTO users(email,name,premium_until,promo_credit) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE premium_until=VALUES(premium_until),promo_credit=VALUES(promo_credit),updated_at=CURRENT_TIMESTAMP',[p.user_email,p.user_email,expires,PREMIUM_CREDIT]);
+          const [u]=await conn.query('SELECT premium_until,promo_credit FROM users WHERE email=? FOR UPDATE',[p.user_email]);
+          const planDays=Number(p.reference_id||30), plan=PREMIUM_PLANS.get(planDays)||PREMIUM_PLANS.get(30);
+          const startDate=new Date(); const base=u[0]?.premium_until && new Date(u[0].premium_until)>startDate?new Date(u[0].premium_until):startDate; const expires=new Date(base); expires.setDate(expires.getDate()+planDays);
+          const creditAdd=Number(plan.credit||0); const newCredit=Number(u[0]?.promo_credit||0)+creditAdd;
+          await conn.query('INSERT INTO premium_subscriptions(user_email,payment_id,price,promo_credit,starts_at,expires_at,status) VALUES(?,?,?,?,?,?,?)',[p.user_email,p.id,plan.price,creditAdd,startDate,expires,'active']);
+          await conn.query('INSERT INTO users(email,name,premium_until,promo_credit) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE premium_until=VALUES(premium_until),promo_credit=? ,updated_at=CURRENT_TIMESTAMP',[p.user_email,p.user_email,expires,newCredit,newCredit]);
         }
       }
       if(p.payment_type==='promotion') await conn.query('UPDATE promotions SET status=\'active\' WHERE payment_id=?',[p.id]);
@@ -170,7 +177,7 @@ app.post('/api/payments/2c2p/backend', async (req,res)=>{
 });
 
 app.get('/api/payments/:invoiceNo', async (req,res)=>{
-  const [rows]=await pool.query('SELECT invoice_no,payment_type,amount,currency,status,provider_transaction_ref,created_at,updated_at FROM payments WHERE invoice_no=?',[req.params.invoiceNo]);
+  const [rows]=await pool.query('SELECT invoice_no,payment_type,reference_id,amount,currency,status,provider_transaction_ref,created_at,updated_at FROM payments WHERE invoice_no=?',[req.params.invoiceNo]);
   if(!rows.length) return res.status(404).json({error:'ไม่พบรายการ'});
   res.json(rows[0]);
 });
@@ -185,14 +192,14 @@ app.use(express.static(publicDir));
 
 app.get('/', (req,res)=>{
   res.sendFile(publicIndex, err => {
-    if (err) res.sendFile(fallbackIndex);
+    if (err && !res.headersSent) res.sendFile(fallbackIndex);
   });
 });
 
 // Client-side routes such as /payment-return should still load the SPA.
 app.get('*',(req,res)=>{
   res.sendFile(publicIndex, err => {
-    if (err) res.sendFile(fallbackIndex);
+    if (err && !res.headersSent) res.sendFile(fallbackIndex);
   });
 });
 
